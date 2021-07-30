@@ -1,0 +1,192 @@
+Description: Smart Home - Create resources in Kinesis Data Streams (KDS), DynamoDB and S3
+
+# Parameters to use within my stack
+Parameters: 
+  
+  pNameStream: 
+    Description: KDS - Stream Name
+    Type: String
+    Default: StreamSmartHome
+  
+  pNameTableDynamo: 
+    Description: DynamoDB - Table name
+    Type: String
+    Default: SmartHome
+  
+  pNameBucket:
+    Description: S3 - Bucket name
+    Type: String
+    Default: smart-home
+  
+  pNameRule:
+    Description: IoT - Rule name
+    Type: String
+    Default: RuleIoTSmartHome
+  
+  pNameSnsTopic:
+    Description: SNS - Topic name
+    Type: String
+    Default: TopicSmartHome
+  
+  pEmailSubscription:
+    Description: SNS - Email subscription
+    Type: String
+    Default: MY_EMAIL
+    
+# Resources to create
+Resources:
+
+  # Kinesis Data Streams
+  rKinesisStream: 
+      Type: AWS::Kinesis::Stream 
+      Properties: 
+        Name: !Ref pNameStream
+        RetentionPeriodHours: 24 
+        ShardCount: 1
+          
+  # DynamoDB
+  rDynamoDBTable: 
+      Type: AWS::DynamoDB::Table
+      Properties: 
+          TableName: !Ref pNameTableDynamo
+          AttributeDefinitions: 
+          - 
+            AttributeName: "id"
+            AttributeType: "S"
+          - 
+            AttributeName: "device"
+            AttributeType: "S"
+          KeySchema: 
+          - 
+            AttributeName: "id"
+            KeyType: "HASH"
+          - 
+            AttributeName: "device"
+            KeyType: "RANGE"
+          BillingMode : PAY_PER_REQUEST
+          
+  # S3
+  rS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join [ -, [ !Ref pNameBucket, !Ref AWS::AccountId ] ]
+  
+  # SNS
+  rSnsTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties: 
+      TopicName: !Ref pNameSnsTopic
+      DisplayName: Activate air conditioning
+  
+  rSubscription:
+    Type: 'AWS::SNS::Subscription'
+    DependsOn: rSnsTopic
+    Properties:
+      TopicArn: !Ref rSnsTopic
+      Endpoint: !Ref pEmailSubscription
+      Protocol: email
+            
+  # IoT Topic Rule
+  rTopicRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Ref pNameRule
+      TopicRulePayload:
+        AwsIotSqlVersion: "2016-03-23"
+        RuleDisabled: 'false'
+        Sql: SELECT * FROM 'iot-sensor-home/test' WHERE house_temperature > 20
+        Actions:
+        - Kinesis:
+            PartitionKey: ${newuuid()}
+            RoleArn: !GetAtt rRoleIoTKinesis.Arn
+            StreamName: !Ref pNameStream
+        - DynamoDBv2:
+            RoleArn: !GetAtt rRoleIoTDynamoDB.Arn
+            PutItem: 
+              TableName: !Ref rDynamoDBTable
+        - S3:
+            BucketName: !Ref rS3Bucket
+            Key: ${topic()}/${timestamp()}
+            RoleArn: !GetAtt rRoleIoTS3.Arn
+
+  # Role and policy to put objects in S3 from IoT Core
+  rRoleIoTS3:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: roleWriteS3
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - iot.amazonaws.com
+            Action:
+            - sts:AssumeRole
+        Path: "/"
+        Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - s3:PutObject
+              Resource: 
+              - !Sub 'arn:aws:s3:::${rS3Bucket}'
+              - !Sub 'arn:aws:s3:::${rS3Bucket}/*'
+  
+  # Role and policy to put items in DynamoDB from IoT Core
+  rRoleIoTDynamoDB:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: roleWriteDynamoDB
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - iot.amazonaws.com
+            Action:
+            - sts:AssumeRole
+        Path: "/"
+        Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - dynamodb:PutItem
+              Resource: 
+              - !GetAtt rDynamoDBTable.Arn
+              
+  # Role and policy to communicate IoT Core with Kinesis Data Streams
+  rRoleIoTKinesis:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: roleWriteKinesis
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - iot.amazonaws.com
+            Action:
+            - sts:AssumeRole
+        Path: "/"
+        Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - kinesis:DescribeStream
+              - kinesis:GetShardIterator
+              - kinesis:GetRecords
+              - kinesis:PutRecord
+              Resource: 
+              - !GetAtt rKinesisStream.Arn
